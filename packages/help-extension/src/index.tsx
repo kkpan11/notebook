@@ -17,30 +17,25 @@ import { jupyterIcon } from '@jupyter-notebook/ui-components';
 import * as React from 'react';
 
 /**
- * A list of resources to show in the help menu.
- */
-const RESOURCES = [
-  {
-    text: 'About Jupyter',
-    url: 'https://jupyter.org',
-  },
-  {
-    text: 'Markdown Reference',
-    url: 'https://commonmark.org/help/',
-  },
-  {
-    text: 'Documentation',
-    url: 'https://jupyter-notebook.readthedocs.io/en/stable/',
-  },
-];
-
-/**
  * The command IDs used by the help plugin.
  */
 namespace CommandIDs {
   export const open = 'help:open';
 
   export const about = 'help:about';
+
+  export const aboutJupyter = 'help:about-jupyter';
+}
+
+// CVE-2026-40171 / GHSA-rch3-82jr-f9w9
+function isUrlSafe(url: string): boolean {
+  try {
+    const parsed = new URL(url, window.location.href);
+    const protocol = parsed.protocol.toLowerCase();
+    return ['http:', 'https:', 'mailto:'].includes(protocol);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -57,7 +52,27 @@ const open: JupyterFrontEndPlugin<void> = {
       label: (args) => args['text'] as string,
       execute: (args) => {
         const url = args['url'] as string;
+        if (!isUrlSafe(url)) {
+          console.warn(`Blocked unsafe URL: ${url}`);
+          return;
+        }
         window.open(url);
+      },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {
+            text: {
+              type: 'string',
+              description: 'The label to display for the help resource.',
+            },
+            url: {
+              type: 'string',
+              description: 'The URL to open in a new browser tab.',
+            },
+          },
+          required: ['text', 'url'],
+        },
       },
     });
   },
@@ -119,7 +134,10 @@ const about: JupyterFrontEndPlugin<void> = {
           </span>
         );
         const version = trans.__('Version: %1', app.version);
-        const copyright = trans.__('© 2021-2023 Jupyter Notebook Contributors');
+        const copyright = trans.__(
+          '© 2021-%1 Jupyter Notebook Contributors',
+          '2026'
+        );
         const body = (
           <>
             <span className="jp-AboutNotebook-version">{version}</span>
@@ -144,16 +162,105 @@ const about: JupyterFrontEndPlugin<void> = {
         dialog.addClass('jp-AboutNotebook');
         void dialog.launch();
       },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    });
+
+    commands.addCommand(CommandIDs.aboutJupyter, {
+      label: trans.__('About Jupyter'),
+      execute: () => {
+        const title = (
+          <>
+            <span className="jp-AboutNotebook-header">
+              <jupyterIcon.react width="196px" height="auto" />
+            </span>
+          </>
+        );
+
+        const jupyterURL = 'https://jupyter.org/about';
+        const contributorURL = 'https://jupyter.org/community';
+        const aboutProjectJupyter = trans.__('ABOUT PROJECT JUPYTER');
+        const communityJupyter = trans.__('JUPYTER COMMUNITY');
+        const externalLinks = (
+          <span>
+            <a
+              href={jupyterURL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="jp-Button-flat jp-AboutNotebook-about-externalLinks"
+            >
+              {aboutProjectJupyter}
+            </a>
+            <a
+              href={contributorURL}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="jp-Button-flat jp-AboutNotebook-about-externalLinks"
+            >
+              {communityJupyter}
+            </a>
+          </span>
+        );
+        const description = trans.__(
+          'Project Jupyter exists to develop open-source software, open standards, and services for interactive computing across dozens of programming languages.'
+        );
+        const body = (
+          <>
+            <span className="jp-AboutNotebook-body">{description}</span>
+            <div>{externalLinks}</div>
+          </>
+        );
+
+        const dialog = new Dialog({
+          title,
+          body,
+          buttons: [
+            Dialog.createButton({
+              label: trans.__('Dismiss'),
+              className:
+                'jp-AboutNotebook-about-button jp-mod-reject jp-mod-styled',
+            }),
+          ],
+        });
+        dialog.addClass('jp-AboutNotebook');
+        dialog.addClass('jp-AboutJupyter');
+        void dialog.launch();
+      },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
     });
 
     if (palette) {
       palette.addItem({ command: CommandIDs.about, category });
+      palette.addItem({ command: CommandIDs.aboutJupyter, category });
     }
 
-    const resourcesGroup = RESOURCES.map((args) => ({
-      args,
-      command: CommandIDs.open,
-    }));
+    const resources = [
+      {
+        text: trans.__('Markdown Reference'),
+        url: 'https://commonmark.org/help/',
+      },
+      {
+        text: trans.__('Documentation'),
+        url: 'https://jupyter-notebook.readthedocs.io/en/stable/',
+      },
+    ];
+
+    const resourcesGroup = [
+      { command: CommandIDs.aboutJupyter },
+      ...resources.map((args) => ({
+        args,
+        command: CommandIDs.open,
+      })),
+    ];
 
     if (menu) {
       menu.helpMenu.addGroup(resourcesGroup, 30);

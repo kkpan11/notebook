@@ -7,6 +7,7 @@ import {
 } from '@jupyterlab/application';
 
 import {
+  ICommandPalette,
   IToolbarWidgetRegistry,
   createToolbarFactory,
   setToolbar,
@@ -34,13 +35,9 @@ import { ITranslator } from '@jupyterlab/translation';
 
 import {
   caretDownIcon,
-  FilenameSearcher,
   folderIcon,
-  IScore,
   runningIcon,
 } from '@jupyterlab/ui-components';
-
-import { Signal } from '@lumino/signaling';
 
 import { Menu, MenuBar } from '@lumino/widgets';
 
@@ -54,21 +51,19 @@ import { FilesActionButtons } from './fileactions';
 const FILE_BROWSER_FACTORY = 'FileBrowser';
 
 /**
- * The file browser plugin id.
- */
-const FILE_BROWSER_PLUGIN_ID = '@jupyterlab/filebrowser-extension:browser';
-
-/**
- * The class name added to the filebrowser filterbox node.
- */
-const FILTERBOX_CLASS = 'jp-FileBrowser-filterBox';
-
-/**
  * The namespace for command IDs.
  */
 namespace CommandIDs {
-  // The command to activate the filebrowser widget in tree view.
+  // The command to show the filebrowser widget in tree view.
+  export const openDirectory = 'filebrowser:open-directory';
+
+  /**
+   * @deprecated Use `filebrowser:open-directory` instead.
+   */
   export const activate = 'filebrowser:activate';
+
+  // Activate the file filter in the file browser
+  export const toggleFileFilter = 'filebrowser:toggle-file-filter';
 }
 
 /**
@@ -158,25 +153,10 @@ const fileActions: JupyterFrontEndPlugin<void> = {
     toolbarRegistry: IToolbarWidgetRegistry,
     translator: ITranslator
   ) => {
-    // TODO: use upstream signal when available to detect selection changes
-    // https://github.com/jupyterlab/jupyterlab/issues/14598
-    const selectionChanged = new Signal<FileBrowser, void>(browser);
-    const methods = [
-      '_selectItem',
-      '_handleMultiSelect',
-      'handleFileSelect',
-    ] as const;
-    methods.forEach((method: (typeof methods)[number]) => {
-      const original = browser['listing'][method];
-      browser['listing'][method] = (...args: any[]) => {
-        original.call(browser['listing'], ...args);
-        selectionChanged.emit(void 0);
-      };
-    });
-
     // Create a toolbar item that adds buttons to the file browser toolbar
     // to perform actions on the files
     const { commands } = app;
+    const { selectionChanged } = browser;
     const fileActions = new FilesActionButtons({
       commands,
       browser,
@@ -185,6 +165,24 @@ const fileActions: JupyterFrontEndPlugin<void> = {
     });
     for (const widget of fileActions.widgets) {
       toolbarRegistry.addFactory(FILE_BROWSER_FACTORY, widget.id, () => widget);
+    }
+  },
+};
+
+/**
+ * A plugin to add the file filter toggle command to the palette
+ */
+const fileFilterCommand: JupyterFrontEndPlugin<void> = {
+  id: '@jupyter-notebook/tree-extension:file-filter-command',
+  description: 'A plugin to add file filter command to the palette.',
+  autoStart: true,
+  optional: [ICommandPalette],
+  activate: (app: JupyterFrontEnd, palette: ICommandPalette | null) => {
+    if (palette) {
+      palette.addItem({
+        command: CommandIDs.toggleFileFilter,
+        category: 'File Browser',
+      });
     }
   },
 };
@@ -230,20 +228,22 @@ const loadPlugins: JupyterFrontEndPlugin<void> = {
 
     app.restored.then(async () => {
       const plugins = await connector.list('all');
-      plugins.ids.forEach(async (id: string) => {
-        const [extension] = id.split(':');
-        // load the plugin if it is built-in the notebook application explicitly
-        // either included as an extension or as a plugin directly
-        const hasPlugin = pluginsSet.has(extension) || pluginsSet.has(id);
-        if (!hasPlugin || isDisabled(id) || id in settingRegistry.plugins) {
-          return;
-        }
-        try {
-          await settingRegistry.load(id);
-        } catch (error) {
-          console.warn(`Settings failed to load for (${id})`, error);
-        }
-      });
+      await Promise.all(
+        plugins.ids.map(async (id: string) => {
+          const [extension] = id.split(':');
+          // load the plugin if it is built-in the notebook application explicitly
+          // either included as an extension or as a plugin directly
+          const hasPlugin = pluginsSet.has(extension) || pluginsSet.has(id);
+          if (!hasPlugin || isDisabled(id) || id in settingRegistry.plugins) {
+            return;
+          }
+          try {
+            await settingRegistry.load(id);
+          } catch (error) {
+            console.warn(`Settings failed to load for (${id})`, error);
+          }
+        })
+      );
     });
   },
 };
@@ -262,9 +262,26 @@ const openFileBrowser: JupyterFrontEndPlugin<void> = {
     browser: IDefaultFileBrowser
   ) => {
     const { commands } = app;
-    commands.addCommand(CommandIDs.activate, {
+    commands.addCommand(CommandIDs.openDirectory, {
       execute: () => {
         notebookTree.currentWidget = browser;
+      },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    });
+
+    // Backward-compatible alias for older command ID.
+    commands.addCommand(CommandIDs.activate, {
+      execute: (args) => commands.execute(CommandIDs.openDirectory, args),
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
       },
     });
   },
@@ -325,28 +342,6 @@ const notebookTreeWidget: JupyterFrontEndPlugin<INotebookTree> = {
         })
     );
 
-    toolbarRegistry.addFactory(
-      FILE_BROWSER_FACTORY,
-      'fileNameSearcher',
-      (browser: FileBrowser) => {
-        const searcher = FilenameSearcher({
-          updateFilter: (
-            filterFn: (item: string) => Partial<IScore> | null,
-            query?: string
-          ) => {
-            browser.model.setFilter((value) => {
-              return filterFn(value.name.toLowerCase());
-            });
-          },
-          useFuzzyFilter: true,
-          placeholder: trans.__('Filter files by name'),
-          forceRefresh: true,
-        });
-        searcher.addClass(FILTERBOX_CLASS);
-        return searcher;
-      }
-    );
-
     setToolbar(
       browser,
       createToolbarFactory(
@@ -366,25 +361,6 @@ const notebookTreeWidget: JupyterFrontEndPlugin<INotebookTree> = {
       nbTreeWidget.addWidget(running);
       nbTreeWidget.tabBar.addTab(running.title);
     }
-
-    const settings = settingRegistry.load(FILE_BROWSER_PLUGIN_ID);
-    Promise.all([settings, app.restored])
-      .then(([settings]) => {
-        // Set Notebook 7 defaults if there is no user setting override
-        [
-          'showFileCheckboxes',
-          'showFileSizeColumn',
-          'sortNotebooksFirst',
-          'showFullPath',
-        ].forEach((setting) => {
-          if (settings.user[setting] === undefined) {
-            void settings.set(setting, true);
-          }
-        });
-      })
-      .catch((reason: Error) => {
-        console.error(reason.message);
-      });
 
     app.shell.add(nbTreeWidget, 'main', { rank: 100 });
 
@@ -410,9 +386,9 @@ const notebookTreeWidget: JupyterFrontEndPlugin<INotebookTree> = {
       tracker['_pool'].current = browser;
     };
 
-    tracker.widgetAdded.connect((sender, widget) =>
-      setCurrentToDefaultBrower()
-    );
+    tracker.widgetAdded.connect((sender, widget) => {
+      setCurrentToDefaultBrower();
+    });
 
     setCurrentToDefaultBrower();
 
@@ -426,6 +402,7 @@ const notebookTreeWidget: JupyterFrontEndPlugin<INotebookTree> = {
 const plugins: JupyterFrontEndPlugin<any>[] = [
   createNew,
   fileActions,
+  fileFilterCommand,
   loadPlugins,
   openFileBrowser,
   notebookTreeWidget,

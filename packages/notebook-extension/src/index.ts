@@ -8,18 +8,26 @@ import {
 
 import {
   ISessionContext,
+  Dialog,
   DOMUtils,
   IToolbarWidgetRegistry,
   ICommandPalette,
+  showDialog,
 } from '@jupyterlab/apputils';
 
 import { Cell, CodeCell } from '@jupyterlab/cells';
 
-import { PageConfig, Text, Time, URLExt } from '@jupyterlab/coreutils';
+import { Time, URLExt } from '@jupyterlab/coreutils';
+
+import { IDebugger, IDebuggerSidebar } from '@jupyterlab/debugger';
 
 import { IDocumentManager } from '@jupyterlab/docmanager';
 
+import { DocumentRegistry } from '@jupyterlab/docregistry';
+
 import { IMainMenu } from '@jupyterlab/mainmenu';
+
+import { IMetadataFormProvider } from '@jupyterlab/metadataform';
 
 import {
   NotebookPanel,
@@ -29,13 +37,19 @@ import {
 
 import { ISettingRegistry } from '@jupyterlab/settingregistry';
 
+import { ITableOfContentsTracker } from '@jupyterlab/toc';
+
 import { ITranslator, nullTranslator } from '@jupyterlab/translation';
+
+import { Collapser } from '@jupyterlab/ui-components';
 
 import { INotebookShell } from '@jupyter-notebook/application';
 
+import { find } from '@lumino/algorithm';
+
 import { Poll } from '@lumino/polling';
 
-import { Widget } from '@lumino/widgets';
+import { PanelLayout, Widget } from '@lumino/widgets';
 
 import { TrustedComponent } from './trusted';
 
@@ -65,6 +79,11 @@ const KERNEL_STATUS_FADE_OUT_CLASS = 'jp-NotebookKernelStatus-fade';
 const SCROLLED_OUTPUTS_CLASS = 'jp-mod-outputsScrolled';
 
 /**
+ * The class for the full width notebook
+ */
+const FULL_WIDTH_NOTEBOOK_CLASS = 'jp-mod-fullwidth';
+
+/**
  * The command IDs used by the notebook plugins.
  */
 namespace CommandIDs {
@@ -72,6 +91,11 @@ namespace CommandIDs {
    * A command to open right sidebar for Editing Notebook Metadata
    */
   export const openEditNotebookMetadata = 'notebook:edit-metadata';
+
+  /**
+   * A command to toggle full width of the notebook
+   */
+  export const toggleFullWidth = 'notebook:toggle-full-width';
 }
 
 /**
@@ -82,13 +106,14 @@ const checkpoints: JupyterFrontEndPlugin<void> = {
   description: 'A plugin for the checkpoint indicator.',
   autoStart: true,
   requires: [IDocumentManager, ITranslator],
-  optional: [INotebookShell, IToolbarWidgetRegistry],
+  optional: [INotebookShell, IToolbarWidgetRegistry, ISettingRegistry],
   activate: (
     app: JupyterFrontEnd,
     docManager: IDocumentManager,
     translator: ITranslator,
     notebookShell: INotebookShell | null,
-    toolbarRegistry: IToolbarWidgetRegistry | null
+    toolbarRegistry: IToolbarWidgetRegistry | null,
+    settingRegistry: ISettingRegistry | null
   ) => {
     const { shell } = app;
     const trans = translator.load('notebook');
@@ -103,18 +128,26 @@ const checkpoints: JupyterFrontEndPlugin<void> = {
       });
     }
 
-    const onChange = async () => {
+    const getCurrent = () => {
       const current = shell.currentWidget;
+      if (!current) {
+        return null;
+      }
+      const context = docManager.contextForWidget(current);
+      if (!context) {
+        return null;
+      }
+      return context;
+    };
+
+    const updateCheckpointDisplay = async () => {
+      const current = getCurrent();
       if (!current) {
         return;
       }
-      const context = docManager.contextForWidget(current);
-
-      context?.fileChanged.disconnect(onChange);
-      context?.fileChanged.connect(onChange);
-
-      const checkpoints = await context?.listCheckpoints();
-      if (!checkpoints) {
+      const checkpoints = await current.listCheckpoints();
+      if (!checkpoints || !checkpoints.length) {
+        node.textContent = '';
         return;
       }
       const checkpoint = checkpoints[checkpoints.length - 1];
@@ -124,19 +157,80 @@ const checkpoints: JupyterFrontEndPlugin<void> = {
       );
     };
 
+    const onSaveState = async (
+      sender: DocumentRegistry.IContext<DocumentRegistry.IModel>,
+      state: DocumentRegistry.SaveState
+    ) => {
+      if (state !== 'completed') {
+        return;
+      }
+      // Add a small artificial delay so that the UI can pick up the newly created checkpoint.
+      // Since the save state signal is emitted after a file save, but not after a checkpoint has been created.
+      setTimeout(() => {
+        void updateCheckpointDisplay();
+      }, 500);
+    };
+
+    const onChange = async () => {
+      const context = getCurrent();
+      if (!context) {
+        return;
+      }
+
+      context.saveState.disconnect(onSaveState);
+      context.saveState.connect(onSaveState);
+
+      await updateCheckpointDisplay();
+    };
+
     if (notebookShell) {
       notebookShell.currentChanged.connect(onChange);
     }
 
-    new Poll({
-      auto: true,
-      factory: () => onChange(),
-      frequency: {
-        interval: 2000,
-        backoff: false,
-      },
-      standby: 'when-hidden',
-    });
+    let checkpointPollingInterval = 30; // Default 30 seconds
+    let poll: Poll | null = null;
+
+    const createPoll = () => {
+      if (poll) {
+        poll.dispose();
+      }
+      if (checkpointPollingInterval > 0) {
+        poll = new Poll({
+          auto: true,
+          factory: () => updateCheckpointDisplay(),
+          frequency: {
+            interval: checkpointPollingInterval * 1000,
+            backoff: false,
+          },
+          standby: 'when-hidden',
+        });
+      }
+    };
+
+    const updateSettings = (settings: ISettingRegistry.ISettings): void => {
+      checkpointPollingInterval = settings.get('checkpointPollingInterval')
+        .composite as number;
+      createPoll();
+    };
+
+    if (settingRegistry) {
+      const loadSettings = settingRegistry.load(checkpoints.id);
+      Promise.all([loadSettings, app.restored])
+        .then(([settings]) => {
+          updateSettings(settings);
+          settings.changed.connect(updateSettings);
+        })
+        .catch((reason: Error) => {
+          console.error(
+            `Failed to load settings for ${checkpoints.id}: ${reason.message}`
+          );
+          // Fall back to creating poll with default settings
+          createPoll();
+        });
+    } else {
+      // Create poll with default settings
+      createPoll();
+    }
   },
 };
 
@@ -149,23 +243,70 @@ const closeTab: JupyterFrontEndPlugin<void> = {
     'Add a command to close the browser tab when clicking on "Close and Shut Down".',
   autoStart: true,
   requires: [IMainMenu],
-  optional: [ITranslator],
+  optional: [INotebookTracker, ISettingRegistry, ITranslator],
   activate: (
     app: JupyterFrontEnd,
     menu: IMainMenu,
+    tracker: INotebookTracker | null,
+    settingRegistry: ISettingRegistry | null,
     translator: ITranslator | null
   ) => {
     const { commands } = app;
     translator = translator ?? nullTranslator;
     const trans = translator.load('notebook');
 
+    let promptForConfirmation = true;
+
+    if (settingRegistry) {
+      const loadSettings = settingRegistry.load(closeTab.id);
+
+      const updateSettings = (settings: ISettingRegistry.ISettings): void => {
+        promptForConfirmation = settings.get('promptForConfirmation')
+          .composite as boolean;
+      };
+
+      Promise.all([loadSettings, app.restored])
+        .then(([settings]) => {
+          updateSettings(settings);
+          settings.changed.connect(updateSettings);
+        })
+        .catch((reason: Error) => {
+          console.error(
+            `Failed to load settings for ${closeTab.id}: ${reason.message}`
+          );
+        });
+    }
+
     const id = 'notebook:close-and-halt';
     commands.addCommand(id, {
-      label: trans.__('Close and Shut Down Notebook'),
+      label: () =>
+        promptForConfirmation
+          ? trans.__('Close and Shut Down Notebook…')
+          : trans.__('Close and Shut Down Notebook'),
       execute: async () => {
-        // Shut the kernel down, without confirmation
+        if (promptForConfirmation) {
+          const fileName =
+            tracker?.currentWidget?.title.label ?? trans.__('the notebook');
+          const result = await showDialog({
+            title: trans.__('Shut down the notebook?'),
+            body: trans.__('Are you sure you want to close "%1"?', fileName),
+            buttons: [
+              Dialog.cancelButton(),
+              Dialog.warnButton({ label: trans.__('Shut Down') }),
+            ],
+          });
+          if (!result.button.accept) {
+            return;
+          }
+        }
         await commands.execute('notebook:shutdown-kernel', { activate: false });
         window.close();
+      },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
       },
     });
     menu.fileMenu.closeAndCleaners.add({
@@ -195,10 +336,102 @@ const openTreeTab: JupyterFrontEndPlugin<void> = {
     commands.addCommand(id, {
       label: trans.__('Open…'),
       execute: async () => {
-        const url = URLExt.join(PageConfig.getBaseUrl(), 'tree');
+        const url = URLExt.join(
+          app.serviceManager.serverSettings.baseUrl,
+          'tree'
+        );
         window.open(url);
       },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
     });
+  },
+};
+
+/**
+ * A plugin to set the notebook to full width.
+ */
+const fullWidthNotebook: JupyterFrontEndPlugin<void> = {
+  id: '@jupyter-notebook/notebook-extension:full-width-notebook',
+  description: 'A plugin to set the notebook to full width.',
+  autoStart: true,
+  requires: [INotebookTracker],
+  optional: [ICommandPalette, ISettingRegistry, ITranslator],
+  activate: (
+    app: JupyterFrontEnd,
+    tracker: INotebookTracker,
+    palette: ICommandPalette | null,
+    settingRegistry: ISettingRegistry | null,
+    translator: ITranslator | null
+  ) => {
+    const trans = (translator ?? nullTranslator).load('notebook');
+
+    let fullWidth = false;
+
+    const toggleFullWidth = () => {
+      const current = tracker.currentWidget;
+      fullWidth = !fullWidth;
+      if (!current) {
+        return;
+      }
+      const content = current;
+      content.toggleClass(FULL_WIDTH_NOTEBOOK_CLASS, fullWidth);
+    };
+
+    let notebookSettings: ISettingRegistry.ISettings;
+
+    if (settingRegistry) {
+      const loadSettings = settingRegistry.load(fullWidthNotebook.id);
+
+      const updateSettings = (settings: ISettingRegistry.ISettings): void => {
+        const newFullWidth = settings.get('fullWidthNotebook')
+          .composite as boolean;
+        if (newFullWidth !== fullWidth) {
+          toggleFullWidth();
+        }
+      };
+
+      Promise.all([loadSettings, app.restored])
+        .then(([settings]) => {
+          notebookSettings = settings;
+          updateSettings(settings);
+          settings.changed.connect((settings) => {
+            updateSettings(settings);
+          });
+        })
+        .catch((reason: Error) => {
+          console.error(reason.message);
+        });
+    }
+
+    app.commands.addCommand(CommandIDs.toggleFullWidth, {
+      label: trans.__('Enable Full Width Notebook'),
+      execute: () => {
+        toggleFullWidth();
+        if (notebookSettings) {
+          notebookSettings.set('fullWidthNotebook', fullWidth);
+        }
+      },
+      isEnabled: () => tracker.currentWidget !== null,
+      isToggled: () => fullWidth,
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
+    });
+
+    if (palette) {
+      palette.addItem({
+        command: CommandIDs.toggleFullWidth,
+        category: 'Notebook Operations',
+      });
+    }
   },
 };
 
@@ -291,9 +524,27 @@ const kernelStatus: JupyterFrontEndPlugin<void> = {
       widget.removeClass(KERNEL_STATUS_FADE_OUT_CLASS);
     };
 
+    // The labels are enumerated explicitly so the translation extractor picks
+    // them up, since msgids must be literal strings.
+    const statusLabels: Record<ISessionContext.KernelDisplayStatus, string> = {
+      unknown: trans.__('Kernel Unknown'),
+      starting: trans.__('Kernel Starting'),
+      idle: trans.__('Kernel Idle'),
+      busy: trans.__('Kernel Busy'),
+      terminating: trans.__('Kernel Terminating'),
+      restarting: trans.__('Kernel Restarting'),
+      autorestarting: trans.__('Kernel Autorestarting'),
+      dead: trans.__('Kernel Dead'),
+      connected: trans.__('Kernel Connected'),
+      connecting: trans.__('Kernel Connecting'),
+      disconnected: trans.__('Kernel Disconnected'),
+      initializing: trans.__('Kernel Initializing'),
+      '': '',
+    };
+
     const onStatusChanged = (sessionContext: ISessionContext) => {
       const status = sessionContext.kernelDisplayStatus;
-      let text = `Kernel ${Text.titleCase(status)}`;
+      let text = statusLabels[status];
       removeClasses();
       switch (status) {
         case 'busy':
@@ -313,7 +564,7 @@ const kernelStatus: JupyterFrontEndPlugin<void> = {
           widget.addClass(KERNEL_STATUS_FADE_OUT_CLASS);
           break;
       }
-      widget.node.textContent = trans.__(text);
+      widget.node.textContent = text;
     };
 
     const onChange = async () => {
@@ -352,6 +603,7 @@ const scrollOutput: JupyterFrontEndPlugin<void> = {
     const autoScroll = (cell: CodeCell) => {
       if (!autoScrollOutputs) {
         // bail if disabled via the settings
+        cell.removeClass(SCROLLED_OUTPUTS_CLASS);
         return;
       }
       const { outputArea } = cell;
@@ -456,7 +708,7 @@ const tabIcon: JupyterFrontEndPlugin<void> = {
   requires: [INotebookTracker],
   activate: (app: JupyterFrontEnd, tracker: INotebookTracker) => {
     // the favicons are provided by Jupyter Server
-    const baseURL = PageConfig.getBaseUrl();
+    const baseURL = app.serviceManager.serverSettings.baseUrl;
     const notebookIcon = URLExt.join(
       baseURL,
       'static/favicons/favicon-notebook.ico'
@@ -536,12 +788,18 @@ const editNotebookMetadata: JupyterFrontEndPlugin<void> = {
   description:
     'Add a command to open right sidebar for Editing Notebook Metadata when clicking on "Edit Notebook Metadata" under Edit menu',
   autoStart: true,
-  optional: [ICommandPalette, ITranslator, INotebookTools],
+  optional: [
+    ICommandPalette,
+    ITranslator,
+    INotebookTools,
+    IMetadataFormProvider,
+  ],
   activate: (
     app: JupyterFrontEnd,
     palette: ICommandPalette | null,
     translator: ITranslator | null,
-    notebookTools: INotebookTools | null
+    notebookTools: INotebookTools | null,
+    metadataForms: IMetadataFormProvider | null
   ) => {
     const { commands, shell } = app;
     translator = translator ?? nullTranslator;
@@ -553,37 +811,160 @@ const editNotebookMetadata: JupyterFrontEndPlugin<void> = {
         const command = 'application:toggle-panel';
         const args = {
           side: 'right',
-          title: 'Show Notebook Tools',
+          title: trans.__('Notebook Tools'),
           id: 'notebook-tools',
         };
 
         // Check if Show Notebook Tools (Right Sidebar) is open (expanded)
         if (!commands.isToggled(command, args)) {
-          await commands.execute(command, args).then((_) => {
-            // For expanding the 'Advanced Tools' section (default: collapsed)
-            if (notebookTools) {
-              const tools = (notebookTools?.layout as any).widgets;
-              tools.forEach((tool: any) => {
-                if (
-                  tool.widget.title.label === trans.__('Advanced Tools') &&
-                  tool.collapsed
-                ) {
-                  tool.toggle();
-                }
-              });
+          await commands.execute(command, args);
+          // For expanding the 'Advanced Tools' section (default: collapsed)
+          const advancedToolsForm = metadataForms?.get('advancedToolsSection');
+          if (notebookTools && advancedToolsForm) {
+            const layout = notebookTools.layout as PanelLayout;
+            for (const section of layout.widgets) {
+              if (
+                section instanceof Collapser &&
+                section.widget === advancedToolsForm.parent &&
+                section.collapsed
+              ) {
+                section.toggle();
+              }
             }
-          });
+          }
         }
       },
       isVisible: () =>
         shell.currentWidget !== null &&
         shell.currentWidget instanceof NotebookPanel,
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
     });
 
     if (palette) {
       palette.addItem({
         command: CommandIDs.openEditNotebookMetadata,
         category: 'Notebook Operations',
+      });
+    }
+  },
+};
+
+/**
+ * A plugin to replace the menu item activating the TOC panel, to allow toggling it.
+ */
+const overrideMenuItems: JupyterFrontEndPlugin<void> = {
+  id: '@jupyter-notebook/notebook-extension:menu-override',
+  description: 'A plugin to override some menu items',
+  autoStart: true,
+  optional: [
+    IDebuggerSidebar,
+    IMainMenu,
+    INotebookShell,
+    ITableOfContentsTracker,
+    ITranslator,
+  ],
+  activate: (
+    app: JupyterFrontEnd,
+    debuggerSidebar: IDebugger.ISidebar | null,
+    mainMenu: IMainMenu | null,
+    shell: INotebookShell | null,
+    tocTracker: ITableOfContentsTracker | null,
+    translator: ITranslator | null
+  ) => {
+    if (!mainMenu || !shell) {
+      return;
+    }
+    const trans = (translator ?? nullTranslator).load('notebook');
+    const { commands } = app;
+
+    if (tocTracker) {
+      const TOC_PANEL_ID = 'table-of-contents';
+      commands.addCommand('toc:toggle-panel', {
+        label: trans.__('Table of Contents'),
+        isToggleable: true,
+        isToggled: () => {
+          const area = shell.getWidgetArea(TOC_PANEL_ID);
+          if (!area) {
+            return false;
+          }
+          const widget = find(
+            shell.widgets(area as INotebookShell.Area),
+            (w) => w.id === TOC_PANEL_ID
+          );
+          if (!widget) {
+            return false;
+          }
+          return shell.isSidePanelVisible(area) && widget.isVisible;
+        },
+        execute: () => {
+          const area = shell.getWidgetArea(TOC_PANEL_ID);
+          if (!area) {
+            return;
+          }
+          const widget = find(
+            shell.widgets(area as INotebookShell.Area),
+            (w) => w.id === TOC_PANEL_ID
+          );
+          if (shell.isSidePanelVisible(area) && widget?.isVisible) {
+            shell.collapse(area);
+          } else {
+            shell.activateById(TOC_PANEL_ID);
+          }
+        },
+        describedBy: {
+          args: {
+            type: 'object',
+            properties: {},
+          },
+        },
+      });
+    }
+
+    if (debuggerSidebar) {
+      const DEBUGGER_PANEL_ID = 'jp-debugger-sidebar';
+      commands.addCommand('debugger:toggle-panel', {
+        label: trans.__('Debugger Panel'),
+        isToggleable: true,
+        isToggled: () => {
+          const area = shell.getWidgetArea(DEBUGGER_PANEL_ID);
+          if (!area) {
+            return false;
+          }
+          const widget = find(
+            shell.widgets(area as INotebookShell.Area),
+            (w) => w.id === DEBUGGER_PANEL_ID
+          );
+          if (!widget) {
+            return false;
+          }
+          return shell.isSidePanelVisible(area) && widget.isVisible;
+        },
+        execute: () => {
+          const area = shell.getWidgetArea(DEBUGGER_PANEL_ID);
+          if (!area) {
+            return;
+          }
+          const widget = find(
+            shell.widgets(area as INotebookShell.Area),
+            (w) => w.id === DEBUGGER_PANEL_ID
+          );
+          if (shell.isSidePanelVisible(area) && widget?.isVisible) {
+            shell.collapse(area);
+          } else {
+            shell.activateById(DEBUGGER_PANEL_ID);
+          }
+        },
+        describedBy: {
+          args: {
+            type: 'object',
+            properties: {},
+          },
+        },
       });
     }
   },
@@ -597,9 +978,11 @@ const plugins: JupyterFrontEndPlugin<any>[] = [
   closeTab,
   openTreeTab,
   editNotebookMetadata,
+  fullWidthNotebook,
   kernelLogo,
   kernelStatus,
   notebookToolsWidget,
+  overrideMenuItems,
   scrollOutput,
   tabIcon,
   trusted,

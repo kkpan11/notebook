@@ -7,7 +7,7 @@ import {
   JupyterFrontEndPlugin,
 } from '@jupyterlab/application';
 
-import { PageConfig, URLExt } from '@jupyterlab/coreutils';
+import { URLExt } from '@jupyterlab/coreutils';
 
 import { ITerminalTracker } from '@jupyterlab/terminal';
 
@@ -52,6 +52,18 @@ const opener: JupyterFrontEndPlugin<void> = {
         });
         commands.execute('terminal:open', { name });
       },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: 'The routed URL path to handle.',
+            },
+          },
+          required: ['path'],
+        },
+      },
     });
 
     router.register({ command, pattern: terminalPattern });
@@ -72,7 +84,7 @@ const redirect: JupyterFrontEndPlugin<void> = {
     tracker: ITerminalTracker,
     notebookPathOpener: INotebookPathOpener | null
   ) => {
-    const baseUrl = PageConfig.getBaseUrl();
+    const baseUrl = app.serviceManager.serverSettings.baseUrl;
     const opener = notebookPathOpener ?? defaultNotebookPathOpener;
 
     tracker.widgetAdded.connect((send, terminal) => {

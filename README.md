@@ -3,7 +3,6 @@
 ![Github Actions Status](https://github.com/jupyter/notebook/workflows/Build/badge.svg)
 [![Documentation Status](https://readthedocs.org/projects/jupyter-notebook/badge/?version=latest)](https://jupyter-notebook.readthedocs.io/en/latest/?badge=latest)
 [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/jupyter/notebook/main?urlpath=tree)
-[![Gitpod](https://img.shields.io/badge/gitpod_editor-open-blue.svg)](https://gitpod.io/#https://github.com/jupyter/notebook)
 
 The Jupyter notebook is a web-based notebook environment for interactive
 computing.
@@ -28,7 +27,7 @@ The newest major version of Notebook is based on:
 
 This represents a significant change to the `jupyter/notebook` code base.
 
-To learn more about Notebook v7: https://jupyter.org/enhancement-proposals/79-notebook-v7/notebook-v7.html
+To learn more about Notebook v7: https://jupyter.org/enhancement-proposals/notebook-v7/
 
 ### Classic Notebook v6
 

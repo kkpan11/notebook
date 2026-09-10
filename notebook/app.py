@@ -1,4 +1,5 @@
 """Jupyter notebook application."""
+
 from __future__ import annotations
 
 import os
@@ -7,7 +8,6 @@ import typing as t
 from pathlib import Path
 
 from jupyter_client.utils import ensure_async  # type:ignore[attr-defined]
-from jupyter_core.application import base_aliases
 from jupyter_core.paths import jupyter_config_dir
 from jupyter_server.base.handlers import JupyterHandler
 from jupyter_server.extension.handler import (
@@ -38,7 +38,7 @@ from ._version import __version__
 
 HERE = Path(__file__).parent.resolve()
 
-Flags = t.Dict[t.Union[str, t.Tuple[str, ...]], t.Tuple[t.Union[t.Dict[str, t.Any], Config], str]]
+Flags = dict[str | tuple[str, ...], tuple[dict[str, t.Any] | Config, str]]
 
 app_dir = Path(get_app_dir())
 version = __version__
@@ -82,6 +82,7 @@ class NotebookBaseHandler(ExtensionHandlerJinjaMixin, ExtensionHandlerMixin, Jup
             else:
                 page_config["preferredPath"] = "/"
         except Exception:
+            self.log.debug("Failed to compute preferred path", exc_info=True)
             page_config["preferredPath"] = "/"
 
         mathjax_config = self.settings.get("mathjax_config", "TeX-AMS_HTML-full,Safe")
@@ -203,8 +204,16 @@ class NotebookHandler(NotebookBaseHandler):
     """A notebook page handler."""
 
     @web.authenticated
-    def get(self, path: str | None = None) -> t.Any:  # noqa: ARG002
-        """Get the notebook page."""
+    async def get(self, path: str = "") -> t.Any:
+        """Get the notebook page. Redirect if it's a directory."""
+        path = path.strip("/")
+        cm = self.contents_manager
+
+        if await ensure_async(cm.dir_exists(path=path)):
+            url = ujoin(self.base_url, "tree", url_escape(path))
+            self.log.debug("Redirecting %s to %s since path is a directory", self.request.path, url)
+            self.redirect(url)
+            return None
         tpl = self.render_template("notebooks.html", page_config=self.get_page_config())
         return self.write(tpl)
 
@@ -228,9 +237,6 @@ class CustomCssHandler(NotebookBaseHandler):
 
         with Path(custom_css_file).open() as css_f:
             return self.write(css_f.read())
-
-
-aliases = dict(base_aliases)
 
 
 class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[misc]
@@ -262,7 +268,7 @@ class JupyterNotebookApp(NotebookConfigShimMixin, LabServerApp):  # type:ignore[
         """,
     )
 
-    flags: Flags = flags  # type:ignore[assignment]
+    flags: Flags = dict(flags)  # type:ignore[assignment]
     flags["expose-app-in-browser"] = (
         {"JupyterNotebookApp": {"expose_app_in_browser": True}},
         "Expose the global app instance to browser via window.jupyterapp.",

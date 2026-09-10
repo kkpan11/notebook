@@ -1,12 +1,13 @@
 import os
 
 import pytest
+from jupyter_server.serverapp import flags as serverapp_flags
 from tornado.httpclient import HTTPClientError
 
-from notebook.app import JupyterNotebookApp, TreeHandler
+from notebook.app import JupyterNotebookApp, NotebookHandler, TreeHandler
 
 
-@pytest.fixture()
+@pytest.fixture
 def notebooks(jp_create_notebook, notebookapp):
     nbpaths = (
         "notebook1.ipynb",
@@ -16,6 +17,14 @@ def notebooks(jp_create_notebook, notebookapp):
     for nb in nbpaths:
         jp_create_notebook(nb)
     return nbpaths
+
+
+def test_notebook_app_flags_are_isolated():
+    notebook_flags = {"custom-css", "expose-app-in-browser"}
+
+    assert JupyterNotebookApp.flags is not serverapp_flags
+    assert notebook_flags <= JupyterNotebookApp.flags.keys()
+    assert notebook_flags.isdisjoint(serverapp_flags)
 
 
 async def test_notebook_handler(notebooks, jp_fetch):
@@ -31,6 +40,16 @@ async def test_notebook_handler(notebooks, jp_fetch):
         # Check that the lab template is loaded
         html = r.body.decode()
         assert "Jupyter Notebook" in html
+
+    redirected_url = None
+
+    def redirect(self, url):
+        nonlocal redirected_url
+        redirected_url = url
+
+    NotebookHandler.redirect = redirect
+    await jp_fetch("notebooks", "jlab_test_notebooks")
+    assert redirected_url == "/a%40b/tree/jlab_test_notebooks"
 
 
 async def test_tree_handler(notebooks, notebookapp, jp_fetch):

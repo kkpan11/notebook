@@ -14,9 +14,16 @@ import {
   FocusTracker,
   Panel,
   SplitPanel,
+  TabPanel,
   Widget,
 } from '@lumino/widgets';
 import { PanelHandler, SidePanelHandler } from './panelhandler';
+import { TabPanelSvg } from '@jupyterlab/ui-components';
+
+/**
+ * The default relative size of the down area when it is expanded.
+ */
+const DEFAULT_DOWN_AREA_SIZE = 0.25;
 
 /**
  * The Jupyter Notebook application shell token.
@@ -37,7 +44,7 @@ export namespace INotebookShell {
   /**
    * The areas of the application shell where widgets can reside.
    */
-  export type Area = 'main' | 'top' | 'menu' | 'left' | 'right';
+  export type Area = 'main' | 'top' | 'menu' | 'left' | 'right' | 'down';
 
   /**
    * Widget position
@@ -80,8 +87,8 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
 
     this._topHandler = new PanelHandler();
     this._menuHandler = new PanelHandler();
-    this._leftHandler = new SidePanelHandler('left');
-    this._rightHandler = new SidePanelHandler('right');
+    this._leftHandler = new SidePanelHandler('left', this.translator);
+    this._rightHandler = new SidePanelHandler('right', this.translator);
     this._main = new Panel();
     const topWrapper = (this._topWrapper = new Panel());
     const menuWrapper = (this._menuWrapper = new Panel());
@@ -134,6 +141,20 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
     middlePanel.addWidget(this._spacer_bottom);
     middlePanel.layout = middleLayout;
 
+    const vsplitPanel = new SplitPanel();
+    this._vsplitPanel = vsplitPanel;
+    vsplitPanel.id = 'jp-main-vsplit-panel';
+    vsplitPanel.spacing = 1;
+    vsplitPanel.orientation = 'vertical';
+    SplitPanel.setStretch(vsplitPanel, 1);
+
+    const downPanel = new TabPanelSvg({
+      tabsMovable: true,
+    });
+    this._downPanel = downPanel;
+    this._downPanel.id = 'jp-down-stack';
+    SplitPanel.setStretch(downPanel, 0);
+
     // TODO: Consider storing this as an attribute this._hsplitPanel if saving/restoring layout needed
     const hsplitPanel = new SplitPanel();
     hsplitPanel.id = 'main-split-panel';
@@ -153,8 +174,21 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
     // panel.
     hsplitPanel.setRelativeSizes([1, 2.5, 1]);
 
+    vsplitPanel.addWidget(hsplitPanel);
+    vsplitPanel.addWidget(downPanel);
+
     rootLayout.spacing = 0;
-    rootLayout.addWidget(hsplitPanel);
+    rootLayout.addWidget(vsplitPanel);
+
+    // initially hiding the down panel
+    this._downPanel.hide();
+
+    // Connect down panel change listeners
+    this._downPanel.tabBar.tabMoved.connect(this._onTabPanelChanged, this);
+    this._downPanel.stackedPanel.widgetRemoved.connect(
+      this._onTabPanelChanged,
+      this
+    );
 
     this.layout = rootLayout;
 
@@ -267,7 +301,7 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
    */
   activateById(id: string): void {
     // Search all areas that can have widgets for this widget, starting with main.
-    for (const area of ['main', 'top', 'left', 'right', 'menu']) {
+    for (const area of ['main', 'top', 'left', 'right', 'menu', 'down']) {
       const widget = find(
         this.widgets(area as INotebookShell.Area),
         (w) => w.id === id
@@ -277,6 +311,17 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
           this.expandLeft(id);
         } else if (area === 'right') {
           this.expandRight(id);
+        } else if (area === 'down') {
+          const tabIndex = this._downPanel.tabBar.titles.findIndex(
+            (title) => title.owner.id === id
+          );
+          if (tabIndex >= 0) {
+            this._downPanel.currentIndex = tabIndex;
+            if (this._downPanel.isHidden) {
+              this._showDownPanel();
+            }
+            widget.activate();
+          }
         } else {
           widget.activate();
         }
@@ -342,8 +387,73 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
         return this._leftHandler.addWidget(widget, rank);
       case 'right':
         return this._rightHandler.addWidget(widget, rank);
+      case 'down':
+        return this._downPanel.addWidget(widget);
       default:
         console.warn(`Cannot add widget to area: ${area}`);
+    }
+  }
+
+  /**
+   * Return a boolean whether the side panel is visible.
+   */
+  isSidePanelVisible(area: string): boolean {
+    if (area === 'left') {
+      return this._leftHandler.isVisible;
+    } else if (area === 'right') {
+      return this._rightHandler.isVisible;
+    }
+    return false;
+  }
+
+  /**
+   * Get the area of a widget, given its id.
+   *
+   * @param id - the widget id
+   * @returns the area where the widget belongs, or null.
+   */
+  getWidgetArea(id: string): string | null {
+    for (const area of ['main', 'top', 'left', 'right', 'menu', 'down']) {
+      const widget = find(
+        this.widgets(area as INotebookShell.Area),
+        (w) => w.id === id
+      );
+      if (widget) {
+        return area;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Expand an area.
+   */
+  expand(area: string): void {
+    if (!['top', 'left', 'right'].includes(area)) {
+      return;
+    }
+    if (area === 'top') {
+      this.expandTop();
+    } else if (area === 'left') {
+      this.expandLeft();
+    } else if (area === 'right') {
+      this.expandRight();
+    }
+  }
+
+  /**
+   * Collapse an area.
+   */
+  collapse(area: string): void {
+    if (!['top', 'left', 'right'].includes(area)) {
+      return;
+    }
+    if (area === 'top') {
+      this.collapseTop();
+    } else if (area === 'left') {
+      this.collapseLeft();
+    } else if (area === 'right') {
+      this.collapseRight();
     }
   }
 
@@ -384,6 +494,9 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
         return;
       case 'right':
         yield* this._rightHandler.widgets;
+        return;
+      case 'down':
+        yield* this._downPanel.widgets;
         return;
       default:
         console.error(`This shell has no area called "${area}"`);
@@ -432,6 +545,39 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
     this._userLayout = configuration;
   }
 
+  /**
+   * Handle a change on the down panel widgets
+   */
+  private _onTabPanelChanged(): void {
+    if (this._downPanel.stackedPanel.widgets.length === 0) {
+      this._hideDownPanel();
+    }
+  }
+
+  /**
+   * Show the down panel, restoring its previous relative size.
+   */
+  private _showDownPanel(size: number = this._lastDownAreaSize): void {
+    const downSize = size > 0.0 ? size : DEFAULT_DOWN_AREA_SIZE;
+    this._lastDownAreaSize = downSize;
+    this._vsplitPanel.setRelativeSizes([
+      Math.max(1.0 - downSize, 0.0),
+      downSize,
+    ]);
+    this._downPanel.show();
+  }
+
+  /**
+   * Hide the down panel, saving its relative size to restore it later.
+   */
+  private _hideDownPanel(): void {
+    const size = this._vsplitPanel.relativeSizes()[1];
+    if (size > 0.0) {
+      this._lastDownAreaSize = size;
+    }
+    this._downPanel.hide();
+  }
+
   private _topWrapper: Panel;
   private _topHandler: PanelHandler;
   private _menuWrapper: Panel;
@@ -442,6 +588,9 @@ export class NotebookShell extends Widget implements JupyterFrontEnd.IShell {
   private _spacer_bottom: Widget;
   private _skipLinkWidgetHandler: Private.SkipLinkWidgetHandler;
   private _main: Panel;
+  private _vsplitPanel: SplitPanel;
+  private _downPanel: TabPanel;
+  private _lastDownAreaSize: number = DEFAULT_DOWN_AREA_SIZE;
   private _translator: ITranslator = nullTranslator;
   private _currentChanged = new Signal<this, FocusTracker.IChangedArgs<Widget>>(
     this

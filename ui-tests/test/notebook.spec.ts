@@ -3,11 +3,11 @@
 
 import path from 'path';
 
-import { expect } from '@jupyterlab/galata';
+import { expect, galata } from '@jupyterlab/galata';
 
 import { test } from './fixtures';
 
-import { runAndAdvance, waitForKernelReady } from './utils';
+import { waitForNotebook, runAndAdvance, waitForKernelReady } from './utils';
 
 const NOTEBOOK = 'example.ipynb';
 
@@ -174,5 +174,171 @@ test.describe('Notebook', () => {
     await page.keyboard.press('Enter');
 
     expect(page.isClosed());
+  });
+
+  test('Toggle the full width of the notebook', async ({
+    page,
+    browserName,
+    tmpPath,
+  }) => {
+    const notebook = 'simple.ipynb';
+    await page.contents.uploadFile(
+      path.resolve(__dirname, `./notebooks/${notebook}`),
+      `${tmpPath}/${notebook}`
+    );
+    await page.goto(`notebooks/${tmpPath}/${notebook}`);
+
+    const menuPath = 'View>Enable Full Width Notebook';
+    await page.menu.clickMenuItem(menuPath);
+
+    const notebookPanel = page.locator('.jp-NotebookPanel').first();
+    await expect(notebookPanel).toHaveClass(/jp-mod-fullwidth/);
+
+    // click to make the blue border around the cell disappear
+    await page.click('.jp-WindowedPanel-outer');
+
+    // wait for the notebook to be ready
+    await waitForNotebook(page, browserName);
+
+    expect(await page.screenshot()).toMatchSnapshot('notebook-full-width.png');
+
+    // undo the full width
+    await page.menu.clickMenuItem(menuPath);
+    await expect(notebookPanel).not.toHaveClass(/jp-mod-fullwidth/);
+  });
+
+  test('Open the log console widget in the down area', async ({
+    page,
+    tmpPath,
+  }) => {
+    const notebook = 'simple.ipynb';
+    await page.contents.uploadFile(
+      path.resolve(__dirname, `./notebooks/${notebook}`),
+      `${tmpPath}/${notebook}`
+    );
+    await page.goto(`notebooks/${tmpPath}/${notebook}`);
+
+    const menuPath = 'View>Show Log Console';
+    await page.menu.clickMenuItem(menuPath);
+
+    await expect(page.locator('.jp-LogConsole')).toBeVisible();
+  });
+
+  test('Toggle cell outputs with the O keyboard shortcut', async ({
+    page,
+    tmpPath,
+  }) => {
+    const notebook = 'autoscroll.ipynb';
+    await page.contents.uploadFile(
+      path.resolve(__dirname, `./notebooks/${notebook}`),
+      `${tmpPath}/${notebook}`
+    );
+    await page.goto(`notebooks/${tmpPath}/${notebook}`);
+
+    await waitForKernelReady(page);
+
+    // Wait for the first cell to be active
+    const firstCell = page.locator('.jp-Cell').first();
+    await expect(firstCell).toHaveClass(/jp-mod-active/);
+
+    // focus the notebook so keyboard shortcuts are handled
+    await firstCell.locator('.jp-InputArea-prompt').click();
+    await expect(firstCell).toBeFocused();
+
+    // run the two cells
+    await page.keyboard.press('Shift+Enter');
+    await page.keyboard.press('ControlOrMeta+Enter');
+
+    await expect(page.locator('.jp-OutputArea-output')).toHaveCount(2, {
+      timeout: 30000,
+    });
+
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('O');
+
+    await page.waitForSelector('.jp-OutputPlaceholder', { state: 'visible' });
+
+    await page.keyboard.press('O');
+
+    await page.waitForSelector('.jp-OutputPlaceholder', { state: 'hidden' });
+  });
+
+  test('Help pager should open in down area with question mark syntax', async ({
+    page,
+    tmpPath,
+  }) => {
+    const notebook = 'empty.ipynb';
+    await page.contents.uploadFile(
+      path.resolve(__dirname, `./notebooks/${notebook}`),
+      `${tmpPath}/${notebook}`
+    );
+    await page.goto(`notebooks/${tmpPath}/${notebook}`);
+
+    await waitForKernelReady(page);
+
+    await page.click('.jp-Cell-inputArea');
+
+    // Enter code in the first cell
+    await page.locator(
+      '.jp-Cell-inputArea >> .cm-editor >> .cm-content[contenteditable="true"]'
+    ).type(`import math
+
+math.pi?`);
+
+    // Run the cell
+    runAndAdvance(page);
+
+    // The help should be displayed in the down area
+    const helpPanel = page.locator('#jp-help-panel');
+    await expect(helpPanel).toBeVisible();
+    await expect(helpPanel).toContainText('3.14');
+
+    // The cell output should remain empty
+    const cellOutput = page.locator('.jp-Cell-outputArea');
+    await expect(cellOutput.first()).toBeEmpty();
+  });
+
+  test.describe('Help pager disabled', () => {
+    test.use({
+      mockSettings: {
+        ...galata.DEFAULT_SETTINGS,
+        '@jupyterlab/notebook-extension:tracker': {
+          helpInBottomPanel: false,
+        },
+      },
+    });
+
+    test('Help should be displayed in the cell output', async ({
+      page,
+      tmpPath,
+    }) => {
+      const notebook = 'empty.ipynb';
+      await page.contents.uploadFile(
+        path.resolve(__dirname, `./notebooks/${notebook}`),
+        `${tmpPath}/${notebook}`
+      );
+      await page.goto(`notebooks/${tmpPath}/${notebook}`);
+
+      await waitForKernelReady(page);
+
+      await page.click('.jp-Cell-inputArea');
+
+      // Enter code in the first cell
+      await page.locator(
+        '.jp-Cell-inputArea >> .cm-editor >> .cm-content[contenteditable="true"]'
+      ).type(`import math
+
+math.pi?`);
+
+      // Run the cell
+      runAndAdvance(page);
+
+      // The help should be displayed inline in the cell output
+      const cellOutput = page.locator('.jp-Cell-outputArea');
+      await expect(cellOutput.first()).toContainText('3.14');
+
+      // The help panel should not be opened
+      await expect(page.locator('#jp-help-panel')).toHaveCount(0);
+    });
   });
 });

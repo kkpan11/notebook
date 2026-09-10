@@ -69,8 +69,9 @@ const interfaceSwitcher: JupyterFrontEndPlugin<void> = {
   id: '@jupyter-notebook/lab-extension:interface-switcher',
   description: 'A plugin to add custom toolbar items to the notebook page.',
   autoStart: true,
-  requires: [ITranslator, INotebookTracker],
+  requires: [ITranslator],
   optional: [
+    INotebookTracker,
     ICommandPalette,
     INotebookPathOpener,
     INotebookShell,
@@ -80,15 +81,20 @@ const interfaceSwitcher: JupyterFrontEndPlugin<void> = {
   activate: (
     app: JupyterFrontEnd,
     translator: ITranslator,
-    notebookTracker: INotebookTracker,
+    notebookTracker: INotebookTracker | null,
     palette: ICommandPalette | null,
     notebookPathOpener: INotebookPathOpener | null,
     notebookShell: INotebookShell | null,
     labShell: ILabShell | null,
     toolbarRegistry: IToolbarWidgetRegistry | null
   ) => {
+    if (!notebookTracker) {
+      // bail if trying to use this plugin without a notebook tracker
+      return;
+    }
+
     const { commands, shell } = app;
-    const baseUrl = PageConfig.getBaseUrl();
+    const baseUrl = app.serviceManager.serverSettings.baseUrl;
     const trans = translator.load('notebook');
     const nbClassicEnabled =
       PageConfig.getOption('nbclassic_enabled') === 'true';
@@ -149,7 +155,9 @@ const interfaceSwitcher: JupyterFrontEndPlugin<void> = {
 
       commands.addCommand(command, {
         label: (args) => {
-          args.noLabel ? '' : commandLabel;
+          if (args.noLabel) {
+            return '';
+          }
           if (args.isMenu || args.isPalette) {
             return commandDescription;
           }
@@ -158,6 +166,26 @@ const interfaceSwitcher: JupyterFrontEndPlugin<void> = {
         caption: commandLabel,
         execute,
         isEnabled,
+        describedBy: {
+          args: {
+            type: 'object',
+            properties: {
+              noLabel: {
+                type: 'boolean',
+                description: 'Whether to hide the command label.',
+              },
+              isMenu: {
+                type: 'boolean',
+                description: 'Whether the command is rendered in a menu.',
+              },
+              isPalette: {
+                type: 'boolean',
+                description:
+                  'Whether the command is rendered in the command palette.',
+              },
+            },
+          },
+        },
       });
 
       if (palette) {
@@ -192,7 +220,7 @@ const interfaceSwitcher: JupyterFrontEndPlugin<void> = {
         overflowMenuOptions: { isVisible: false },
       };
       const menubar = new MenuBar(overflowOptions);
-      switcher.title.label = trans.__('Open in...');
+      switcher.title.label = trans.__('Open in…');
       switcher.title.icon = caretDownIcon;
       menubar.addMenu(switcher);
 
@@ -235,8 +263,17 @@ const launchNotebookTree: JupyterFrontEndPlugin<void> = {
     commands.addCommand(CommandIDs.launchNotebookTree, {
       label: trans.__('Launch Jupyter Notebook File Browser'),
       execute: () => {
-        const url = URLExt.join(PageConfig.getBaseUrl(), 'tree');
+        const url = URLExt.join(
+          app.serviceManager.serverSettings.baseUrl,
+          'tree'
+        );
         window.open(url);
+      },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
       },
     });
 

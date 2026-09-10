@@ -4,12 +4,7 @@ import os
 import os.path as osp
 import pathlib
 import shutil
-import sys
-
-if sys.version_info < (3, 10):
-    from importlib_resources import files
-else:
-    from importlib.resources import files
+from importlib.resources import files
 
 import pytest
 
@@ -32,7 +27,7 @@ workspaces_dir = pytest.fixture(lambda tmp_path: mkdir(tmp_path, "workspaces"))
 labextensions_dir = pytest.fixture(lambda tmp_path: mkdir(tmp_path, "labextensions_dir"))
 
 
-@pytest.fixture()
+@pytest.fixture
 def make_notebook_app(  # PLR0913
     jp_root_dir,
     jp_template_dir,
@@ -131,7 +126,7 @@ def make_notebook_app(  # PLR0913
     return _make_notebook_app
 
 
-@pytest.fixture()
+@pytest.fixture
 def notebookapp(jp_serverapp, make_notebook_app):
     app = make_notebook_app()
     app._link_jupyter_server_extension(jp_serverapp)
